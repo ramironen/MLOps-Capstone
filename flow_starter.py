@@ -488,6 +488,7 @@ def _build_feature_table(df: pd.DataFrame) -> pd.DataFrame:
 
 
 class MLFlowCapstoneFlow(FlowSpec):
+    # Flow parameters are provided via CLI arguments.
     reference_path = Parameter("reference-path")
     batch_path = Parameter("batch-path")
     model_name = Parameter("model-name", default="green_taxi_tip_model")
@@ -495,14 +496,9 @@ class MLFlowCapstoneFlow(FlowSpec):
     min_improvement = Parameter("min-improvement", default=0.01)
     stability_max_regress_pct = Parameter("stability-max-regress-pct", default=0.02)
     block_on_integrity_warn = Parameter("block-on-integrity-warn", default=False)
+    # Demo-only: inject a failure to show resume behavior.
     fail_step = Parameter("fail-step", default="")
 
-    def _maybe_fail(self, step_name: str) -> None:
-        # Optional failure injection for the resumption demo.
-        if getattr(current, "origin_run_id", None):
-            return
-        if str(self.fail_step).strip().lower() == step_name:
-            raise RuntimeError(f"Intentional failure for resumption demo at step: {step_name}")
 
     @step
     def start(self):
@@ -611,6 +607,7 @@ class MLFlowCapstoneFlow(FlowSpec):
             client = MlflowClient()
             model_name = self.model_name
 
+            # If no champion exists yet, bootstrap one from reference data.
             try:
                 champion = client.get_model_version_by_alias(model_name, "champion")
                 champion_uri = f"models:/{model_name}@champion"
@@ -641,9 +638,9 @@ class MLFlowCapstoneFlow(FlowSpec):
                 mlflow.sklearn.log_model(model, "model")
                 model_uri = f"runs:/{mlflow.active_run().info.run_id}/model"
                 result = mlflow.register_model(model_uri, model_name)
-                client.set_registered_model_alias(model_name, "champion", result.version)
-                client.set_model_version_tag(model_name, result.version, "role", "champion")
-                client.set_model_version_tag(model_name, result.version, "promotion_reason", "bootstrap")
+                client.set_registered_model_alias(model_name, "champion", result.version)# alias as champion
+                client.set_model_version_tag(model_name, result.version, "role", "champion")# tag as champion
+                client.set_model_version_tag(model_name, result.version, "promotion_reason", "bootstrap")# tag as bootstrap
 
                 self.champion_model_uri = f"models:/{model_name}@champion"
                 self.champion_version = result.version
@@ -665,16 +662,17 @@ class MLFlowCapstoneFlow(FlowSpec):
 
     @step  # E
     def model_gate(self):
+        # performance check and retrain decision
         init_mlflow(self.model_name)
         with mlflow.start_run(run_name="model_gate"):
             mlflow.set_tag("pipeline_step", "model_gate")
             mlflow.set_tag("model_name", self.model_name)
             mlflow.log_params(
                 {
-                    "retrain_threshold": float(self.retrain_threshold),
-                    "min_improvement": float(self.min_improvement),
-                    "stability_max_regress_pct": float(self.stability_max_regress_pct),
-                    "block_on_integrity_warn": bool(self.block_on_integrity_warn),
+                    "retrain_threshold": float(self.retrain_threshold),# RMSE increase threshold for retraining
+                    "min_improvement": float(self.min_improvement),# Minimum improvement percentage for promotion
+                    "stability_max_regress_pct": float(self.stability_max_regress_pct),# Maximum regression percentage for stability check
+                    "block_on_integrity_warn": bool(self.block_on_integrity_warn),# Whether to block on integrity warnings
                 }
             )
 
@@ -706,6 +704,7 @@ class MLFlowCapstoneFlow(FlowSpec):
             if self.champion_feature_cols:
                 X_eval = X_eval[self.champion_feature_cols]
 
+            # Evaluate champion on the current batch to measure degradation.
             try:
                 preds = self.champion_model.predict(X_eval)
             except Exception:
@@ -715,6 +714,7 @@ class MLFlowCapstoneFlow(FlowSpec):
             preds = np.asarray(preds, dtype=float)
             rmse_champion = float(np.sqrt(np.nanmean((preds - y.to_numpy()) ** 2)))
 
+            # Baseline = mean predictor RMSE, used to contextualize degradation.
             baseline_value = (
                 float(self.ref_target.dropna().mean())
                 if self.ref_target is not None and not self.ref_target.dropna().empty
@@ -777,7 +777,6 @@ class MLFlowCapstoneFlow(FlowSpec):
             mlflow.set_tag("model_name", self.model_name)
             mlflow.log_param("trained_on_batches", Path(self.reference_path).name)
             mlflow.log_param("eval_batch_id", Path(self.batch_path).name)
-            self._maybe_fail("retrain")
 
             if self.ref_target is None or self.ref_target.dropna().empty:
                 raise ValueError("Retrain requires a non-empty target column.")
@@ -800,6 +799,7 @@ class MLFlowCapstoneFlow(FlowSpec):
                     if col not in X_batch.columns:
                         X_batch[col] = 0.0
                 X_batch = X_batch[X_ref.columns]
+                # Upweight recent batch data to adapt faster to drift.
                 batch_weight = 5
                 X_train = pd.concat([X_ref] + [X_batch] * batch_weight, ignore_index=True)
                 y_train = pd.concat([y_ref] + [y_batch] * batch_weight, ignore_index=True)
@@ -823,6 +823,7 @@ class MLFlowCapstoneFlow(FlowSpec):
             mlflow.log_metric("rmse_candidate", rmse_candidate)
             mlflow.log_metric("rmse_champion", self.rmse_champion)
 
+            # Register candidate model so it appears in the MLflow Model Registry.
             mlflow.sklearn.log_model(model, "model")
             model_uri = f"runs:/{mlflow.active_run().info.run_id}/model"
             result = mlflow.register_model(model_uri, self.model_name)
@@ -864,7 +865,6 @@ class MLFlowCapstoneFlow(FlowSpec):
                     "block_on_integrity_warn": bool(self.block_on_integrity_warn),
                 }
             )
-            self._maybe_fail("candidate_acceptance")
 
             client = MlflowClient()
             promote = False # do not promote yet
@@ -912,7 +912,7 @@ class MLFlowCapstoneFlow(FlowSpec):
                 }
             )
 
-            # Promotion requires improvement and no integrity block.
+            # Promotion requires improvement, stability, and no integrity block.
             if integrity_block: # blocked due to data issues
                 promote = False
                 reason = "integrity_warn_blocked"
