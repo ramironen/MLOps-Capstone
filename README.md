@@ -1,7 +1,6 @@
 # MLOps Capstone Project (Metaflow + MLflow)
 
-This README is for the capstone flow in `flow_starter.py`. It follows the required run pattern in `README_project.md`.
-
+This README is for the capstone flow in `flow_starter.py`.
 ## Setup (pip)
 
 Run these from the capstone directory:
@@ -32,7 +31,7 @@ Open `http://localhost:5000`, click **Experiments**, then open:
 
 In this experiment, each Metaflow step logs its own MLflow run with the tag `pipeline_step`. Use the filter box (example: `tags.pipeline_step = model_gate`) and sort by **Start Time** to find the latest run for each step.
 
-## Required runs (3 runs)
+## Example runs
 
 Replace `/path/to/...` with your data files.
 
